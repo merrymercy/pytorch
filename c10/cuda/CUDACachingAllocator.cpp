@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <iostream>
 
 namespace c10 {
 
@@ -830,9 +831,14 @@ class THCCachingAllocator {
         "Allocator not initialized for device ",
         device,
         ": did you call init?");
-    Block* block = device_allocator[device]->malloc(device, size, stream);
-    add_allocated_block(block);
-    *devPtr = (void*)block->ptr;
+    const char* p_threshold = getenv("PYTORCH_CACHE_THRESHOLD");
+    if (p_threshold != nullptr && size >= atoi(p_threshold)) {
+      C10_CUDA_CHECK(cudaMalloc(devPtr, size));
+    } else {
+      Block* block = device_allocator[device]->malloc(device, size, stream);
+      add_allocated_block(block);
+      *devPtr = (void*)block->ptr;
+    }
   }
 
   void free(void* ptr) {
@@ -840,10 +846,11 @@ class THCCachingAllocator {
       return;
     }
     Block* block = get_allocated_block(ptr, true /* remove */);
-    if (!block) {
-      AT_ERROR("invalid device pointer: ", ptr);
+    if (block) {
+      device_allocator[block->device]->free(block);
+    } else {
+      C10_CUDA_CHECK(cudaFree(ptr));
     }
-    device_allocator[block->device]->free(block);
   }
 
   void emptyCache() {
@@ -878,8 +885,12 @@ class THCCachingAllocator {
 
     Block* block = get_allocated_block(ptr.get());
     // block must not be null reaching here
-    TORCH_INTERNAL_ASSERT(block != nullptr, "No allocated block can be found");
-    device_allocator[block->device]->recordStream(block, stream);
+    //TORCH_INTERNAL_ASSERT(block != nullptr, "No allocated block can be found");
+    if (block == nullptr) {
+      {}
+    } else {
+      device_allocator[block->device]->recordStream(block, stream);
+    }
   }
 
   std::vector<SegmentInfo> snapshot() {
